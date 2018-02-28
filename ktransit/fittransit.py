@@ -4,6 +4,9 @@ from scipy import optimize
 import numpy as np
 from .wiener2 import wiener2, wienerLG
 
+from autograd import numpy as ag_np
+from autograd import grad
+
 class FitTransit(object):
 
     def __init__(self):
@@ -229,6 +232,235 @@ class FitTransit(object):
         fig = plot_results(time,obsf,model)
         return fig
 
+class FitTransitAutoGrad(object):
+    
+    def __init__(self):
+        self.mod = ktransit.LCModel()
+    #    self.nplanets = self.mod.nplanets
+        self.free_parameters(fitparstar=[],
+        fitparplanet=[])
+        self.planetguess_d = {}
+        self.uservdata = False
+
+    @property
+    def nplanets(self):
+        self._nplanets = self.mod.nplanets
+        return self._nplanets
+
+    def add_guess_star(self,rho=1.5, ld1=0.2,
+        ld2=0.4, ld3=0.0, ld4=0.0, dil=0.0,
+        veloffset=0.0, zpt=0.0):
+        self.starguess_d={
+            'rho': rho,
+            'ld1': ld1,
+            'ld2': ld2,
+            'ld3': ld3,
+            'ld4': ld4,
+            'dil': dil,
+            'veloffset': veloffset,
+            'zpt': zpt}
+        self.mod.add_star(rho, ld1,
+        ld2, ld3, ld4, dil,
+        veloffset, zpt)
+
+    def update_star(self,**kwargs):
+        goodlist = ['rho', 'ld1',
+        'ld2', 'ld3', 'ld4', 'dil',
+        'veloffset', 'zpt']
+        kwnew = dict([(k,v) for k,v in kwargs.items() if k in goodlist])
+        self.mod.update_star(**kwnew)
+
+    def update_planet(self,pnum,**kwargs):
+        goodlist = ['T0',
+            'period',
+            'impact',
+            'rprs',
+            'ecosw',
+            'esinw',
+            'rvamp',
+            'occ',
+            'ell',
+            'alb']
+        kwnew = dict([(k,v) for k,v in kwargs.items() if k in goodlist])
+        self.mod.update_planet(pnum=pnum,**kwnew)
+
+    def add_guess_planet(self,
+        T0=1.0, period=1.0, impact=0.1,
+        rprs=0.1, ecosw=0.0, esinw=0.0,
+        rvamp=0.0, occ=0.0, ell=0.0,
+        alb=0.0):
+        pname = 'pnum' + str(self.nplanets)
+        planet_d = {
+            'T0': T0,
+            'period': period,
+            'impact': impact,
+            'rprs': rprs,
+            'ecosw': ecosw,
+            'esinw': esinw,
+            'rvamp': rvamp,
+            'occ': occ,
+            'ell': ell,
+            'alb': alb}
+        self.planetguess_d[pname] =  planet_d
+        self.mod.add_planet(
+            T0=T0, period=period, impact=impact,
+            rprs=rprs, ecosw=ecosw, esinw=ecosw,
+            rvamp=rvamp, occ=occ, ell=ell,
+            alb=alb)
+
+    def add_data(self,time=None, flux=None,
+        ferr=None, itime=None,
+        ntt=None, tobs=None, omc=None,
+        datatype=None):
+
+        if time is None:
+            self.time = ag_np.arange(0,10,0.0188)
+        else:
+            self.time = time
+        npt = len(self.time)
+        nmax = 1500000
+
+        if flux is None:
+            self.flux = ag_np.zeros(npt)
+        else:
+            self.flux = flux
+
+        if ferr is None:
+            self.ferr = ag_np.zeros(npt) + 0.1
+        else:
+            self.ferr = ferr
+
+        if itime is None:
+            default_cadence = 1625.3 / 86400.
+            self.itime = ag_np.zeros(npt) + default_cadence
+        else:
+            self.itime = itime
+
+        if ntt is None:
+            self.ntt = ag_np.zeros(self.nplanets)
+        else:
+            self.ntt = ntt
+
+        if tobs is None:
+            self.tobs = ag_np.empty([self.nplanets,nmax])
+        else:
+            self.tobs = tobs
+
+        if omc is None:
+            self.omc = ag_np.empty([self.nplanets,nmax])
+        else:
+            self.omc = omc
+
+        if datatype is None:
+            self.datatype = ag_np.zeros(npt)
+        else:
+            self.datatype = datatype
+
+        self.mod.add_data(time=time, itime=itime,
+            ntt=ntt, tobs=tobs, omc=omc,
+            datatype=datatype)
+
+    def add_rv(self,rvtime=None,rvval=None,rverr=None):
+        self.uservdata = True
+        self.rvtime = rvtime
+        self.rvval = rvval
+        self.rverr = rverr
+
+        self.mod.add_rv(rvtime=rvtime)
+
+
+    def free_parameters(self,
+        fitparstar=['rho','zpt'],
+        fitparplanet=['T0','period','impact','rprs']):
+        self.fitparstar = fitparstar
+        self.fitparplanet = fitparplanet
+
+    def calc_model(self):
+        self._tmod = self.mod.transitmodel
+        return self._tmod
+
+    def get_rv_model(self):
+        self.rv_model = self.mod._rvmodel
+        return self.rv_model
+
+    def residuals(self):
+        self._res =  (self.flux - self.calc_model()) / self.ferr
+
+        if self.uservdata:
+            self._res = ag_np.r_[
+                self._res,(self.rvval - self.get_rv_model()) / self.rverr]
+
+        return self._res
+
+
+    def ret_lstsq(self,fitpars):
+        """
+
+        """
+        fitstar_d = dict(zip(self.fitparstar,fitpars[:len(self.fitparstar)]))
+        self.update_star(**fitstar_d)
+
+        nps = len(self.fitparstar)
+        npp = len(self.fitparplanet)
+        for i in range(self.nplanets):
+            fitplanet_d = dict(
+                zip(self.fitparplanet,
+                fitpars[nps+i*npp:nps+(i+1)*npp
+                ]))
+
+            self.update_planet(pnum=i,**fitplanet_d)
+
+        return self.residuals()
+
+    def deriv_ret_lstsq(self, fitpars):
+        return grad(self.ret_lstsq)
+    
+    def do_fit(self):
+        fitvalstar = [self.starguess_d[k] for k in self.fitparstar]
+        fitvalplanet = []
+        for i in range(self.nplanets):
+            pdic = self.planetguess_d['pnum' + str(i)]
+            fitvalplanet = ag_np.r_[fitvalplanet,
+            [pdic[k] for k in self.fitparplanet]]
+        fitpars = ag_np.r_[fitvalstar,fitvalplanet]
+        self.fitout = optimize.leastsq(self.ret_lstsq, fitpars, 
+                                        Dfun=self.deriv_ret_lstsq, 
+                                        full_output=True)
+        self.make_fitoutdicts()
+        
+        self.transitmodel = self.mod.transitmodel
+    
+    def make_fitoutdicts(self):
+        self.fitresult = self.fitout[0]
+        nps = len(self.fitparstar)
+        npp = len(self.fitparplanet)
+        stellarout = self.fitresult[0:nps]
+        self.fitresultstellar = dict(zip(self.fitparstar,stellarout))
+        self.fitresultplanets = {}
+        for i in range(self.nplanets):
+            planetout = self.fitresult[nps + i*npp:nps + (i+1)*npp]
+            self.fitresultplanets['pnum' + str(i)] = dict(
+                zip(self.fitparplanet,planetout))
+    
+    def print_results(self):
+        print("Best-fitting stellar parameters")
+        for k,v in self.fitresultstellar.items():
+            print(u'{0}: {1}'.format(k, v))
+        print()
+        for i in range(self.nplanets):
+            print("Best-fitting planet parameters for planet {0}".format(i))
+            pnum = 'pnum' + str(i)
+            for k,v in self.fitresultplanets[pnum].items():
+                print(u'{0}: {1}'.format(k, v))
+            print()
+    
+    def plot_results(self):
+        time = self.time
+        obsf = self.obsf
+        model = self.transitmodel
+        fig = plot_results(time,obsf,model)
+        return fig
+
 class FitTransitWiener(FitTransit):
 
     def __init__(self):
@@ -250,7 +482,7 @@ class FitTransitWiener(FitTransit):
         self._res = (self.flux - (self._ffilt + cm)) / self.ferr
 
         if self.uservdata:
-            self._res = np.r_[
+            self._res = ag_np.r_[
                 self._res,(
                     self.rvval - self.get_rv_model()) / self.rverr]
 
